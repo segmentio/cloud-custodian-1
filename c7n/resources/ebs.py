@@ -5,6 +5,9 @@ import logging
 import itertools
 import json
 import time
+from datetime import datetime
+from datetime import timedelta
+
 
 from botocore.exceptions import ClientError
 from concurrent.futures import as_completed
@@ -875,6 +878,50 @@ class HealthFilter(HealthEventFilter):
             if r['configurationItemStatus'] != u'ResourceDeleted':
                 return camelResource(json.loads(r['configuration']))
         return {"VolumeId": rid}
+
+
+@EBS.filter_registry.register('detached')
+class SnapshotUnusedFilter(Filter):
+    """Filters EBS volumes which have no attachments in cloud trail in last x days
+    value: No of days to look back in cloud trail history. Max is 90 days .
+    :example:
+    .. code-block:: yaml
+            policies:
+              - name: mark-ebs-detached-30-days
+                resource: ebs
+                filters:
+                  - type: detached
+                    value: 30
+    """
+    schema = type_schema('detached', value={'type': 'number'})
+    def process(self, volumes, event=None):
+        time_now = datetime.now()
+        time_back = time_now - timedelta(days=self.data.get('value'))
+        
+        client = local_session(self.manager.session_factory).client('cloudtrail')
+        
+        matches = []
+        
+        for vol in volumes:
+            volId = vol['VolumeId']
+            response = client.lookup_events(
+                LookupAttributes=[
+                    {
+                        "AttributeKey": "ResourceName",
+                        "AttributeValue": volId
+                    },
+                ],
+                MaxResults=10,
+                StartTime=time_back,
+                EndTime=time_now,
+             )
+            
+            attach_events = [event for event in response['Events'] if event.get("EventName") == 'AttachVolume']
+            # If no attach volume events in the last x days
+            if(len(attach_events) == 0):
+                matches.append(vol)
+        return matches
+
 
 
 @EBS.action_registry.register('copy-instance-tags')
